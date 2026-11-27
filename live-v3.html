@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>工业调色参考 V3</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    margin:0;
+    font:14px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif;
+    background:#0b1220;
+    color:#e8f1ff;
+  }
+  .wrap{max-width:560px;margin:0 auto;padding:12px}
+  .stage{
+    position:relative;
+    background:#000;
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+  }
+  video{display:none;width:100%;aspect-ratio:4/3;object-fit:cover}
+  canvas{display:block;width:100%;aspect-ratio:4/3}
+  .split{
+    position:absolute;left:50%;top:0;bottom:0;width:3px;
+    background:#ff3b30;
+    pointer-events:none;
+  }
+  .zone{
+    position:absolute;
+    top:50%;
+    transform:translate(-50%,-50%);
+    width:58px;
+    height:58px;
+    border:3px solid #22e0a6;
+    border-radius:50%;
+    box-shadow:0 0 0 3px rgba(0,0,0,.35);
+    pointer-events:none;
+  }
+  .zone span{
+    position:absolute;
+    left:50%;
+    top:64px;
+    transform:translateX(-50%);
+    font-size:12px;
+    background:rgba(0,0,0,.6);
+    padding:3px 8px;
+    border-radius:8px;
+    white-space:nowrap;
+  }
+  .zoneL{left:25%}
+  .zoneR{left:75%}
+  .panel{
+    margin-top:12px;
+    background:linear-gradient(180deg,#1d6cff,#123f8f);
+    border-radius:16px;
+    padding:14px;
+    box-shadow:0 8px 24px rgba(0,0,0,.28);
+  }
+  .title{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    font-weight:700;
+    margin-bottom:10px;
+  }
+  .close{
+    width:24px;height:24px;border-radius:50%;
+    background:#ff4d4f;color:#fff;
+    display:grid;place-items:center;
+    font-size:14px;
+  }
+  .deBox{
+    background:rgba(255,255,255,.12);
+    border-radius:12px;
+    padding:10px;
+    margin-bottom:10px;
+  }
+  .big{font-size:28px;font-weight:800}
+  .tips{
+    background:rgba(0,0,0,.22);
+    border-radius:12px;
+    padding:12px;
+    min-height:104px;
+  }
+  .tipLine{
+    display:flex;
+    justify-content:space-between;
+    gap:12px;
+    padding:6px 0;
+    border-bottom:1px solid rgba(255,255,255,.12);
+  }
+  .tipLine:last-child{border-bottom:0}
+  .muted{color:#c7d7ff;font-size:12px}
+  .row{display:flex;gap:8px;margin:10px 0}
+  button{
+    flex:1;
+    padding:10px;
+    border:0;
+    border-radius:10px;
+    background:#26364f;
+    color:#e8f1ff;
+    font-size:14px;
+  }
+  button.green{background:#16a34a;color:#fff}
+  button.red{background:#ef4444;color:#fff}
+  button.blue{background:#2563eb;color:#fff}
+  .sw{display:flex;gap:10px;margin:12px 0}
+  .cell{flex:1;background:#101a2c;border-radius:12px;padding:10px}
+  .chip{height:54px;border-radius:10px;border:1px solid rgba(255,255,255,.2);background:#222}
+  .warn{color:#ffd166;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+    <div class="split"></div>
+    <div class="zone zoneL"><span>样板区</span></div>
+    <div class="zone zoneR"><span>调色区</span></div>
+  </div>
+
+  <div class="panel">
+    <div class="title">
+      <span>工业调色参考系统</span>
+      <span class="close">×</span>
+    </div>
+
+    <div class="deBox">
+      <div>色差 ΔE00</div>
+      <div class="big" id="de">--</div>
+      <div id="deText">未取样</div>
+    </div>
+
+    <div class="tips" id="tips">
+      <div class="muted">请先启动摄像头，再分别取样板区和调色区颜色。</div>
+    </div>
+
+    <div class="warn">
+      注意：手机摄像头只能做方向参考，不能替代专业测色仪；百分比不是精确加料量。
+    </div>
+  </div>
+
+  <div class="sw">
+    <div class="cell">
+      <div class="chip" id="chipT"></div>
+      <div id="hexT">#------</div>
+      <div>样板色</div>
+    </div>
+    <div class="cell">
+      <div class="chip" id="chipM"></div>
+      <div id="hexM">#------</div>
+      <div>调色区</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="btnStart" class="green">启动摄像头</button>
+    <button id="btnStop" class="red">停止</button>
+  </div>
+
+  <div class="row">
+    <button id="btnTarget">取样板色</button>
+    <button id="btnMix">取调色区</button>
+  </div>
+
+  <div class="row">
+    <button id="btnCheck" class="blue">重新计算</button>
+    <button id="btnClear">清空</button>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+let stream = null;
+let target = null;
+let mix = null;
+
+function clamp(v, min, max){
+  return Math.max(min, Math.min(max, v));
+}
+
+function hex(rgb){
+  return '#' + rgb.map(v => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('').toUpperCase();
+}
+
+function draw(){
+  if(video.readyState >= 2){
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+}
+
+function sample(x, y){
+  const px = Math.round(x * canvas.width);
+  const py = Math.round(y * canvas.height);
+  const d = ctx.getImageData(px, py, 1, 1).data;
+  return [d[0], d[1], d[2]];
+}
+
+function setChip(id, rgb){
+  document.getElementById(id).style.background = hex(rgb);
+}
+
+function srgbToLinear(c){
+  c /= 255;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+function rgbToXyz(rgb){
+  const r = srgbToLinear(rgb[0]);
+  const g = srgbToLinear(rgb[1]);
+  const b = srgbToLinear(rgb[2]);
+  return [
+    r * 0.4124564 + g * 0.3575761 + b * 0.1804375,
+    r * 0.2126729 + g * 0.7151522 + b * 0.0721750,
+    r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+  ];
+}
+
+function xyzToLab(xyz){
+  const wp = [0.95047, 1, 1.08883];
+  const f = t => t > 0.008856 ? Math.cbrt(t) : (7.787 * t + 16 / 116);
+  const fx = f(xyz[0] / wp[0]);
+  const fy = f(xyz[1] / wp[1]);
+  const fz = f(xyz[2] / wp[2]);
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+
+function rgbToLab(rgb){
+  return xyzToLab(rgbToXyz(rgb));
+}
+
+function deltaE00(l1, l2){
+  const rad = d => d * Math.PI / 180;
+  const deg = r => r * 180 / Math.PI;
+
+  const [L1, a1, b1] = l1;
+  const [L2, a2, b2] = l2;
+
+  const C1 = Math.hypot(a1, b1);
+  const C2 = Math.hypot(a2, b2);
+  const C = (C1 + C2) / 2;
+
+  const G = 0.5 * (1 - Math.sqrt(Math.pow(C, 7) / (Math.pow(C, 7) + Math.pow(25, 7))));
+  const a1p = (1 + G) * a1;
+  const a2p = (1 + G) * a2;
+
+  const C1p = Math.hypot(a1p, b1);
+  const C2p = Math.hypot(a2p, b2);
+
+  const h1p = (deg(Math.atan2(b1, a1p)) + 360) % 360;
+  const h2p = (deg(Math.atan2(b2, a2p)) + 360) % 360;
+
+  let dhp = 0;
+  if(C1p * C2p !== 0){
+    dhp = h2p - h1p;
+    if(dhp > 180) dhp -= 360;
+    if(dhp < -180) dhp += 360;
+  }
+
+  const dLp = L2 - L1;
+  const dCp = C2p - C1p;
+  const dHp = 2 * Math.sqrt(C1p * C2p) * Math.sin(rad(dhp) / 2);
+
+  const Lbp = (L1 + L2) / 2;
+  const Cbp = (C1p + C2p) / 2;
+
+  let hbp = h1p + h2p;
+  if(C1p * C2p !== 0){
+    if(Math.abs(h1p - h2p) > 180) hbp += 360;
+    hbp /= 2;
+    if(hbp < 0) hbp += 360;
+  } else {
+    hbp = h1p + h2p;
+  }
+
+  const T = 1
+    - 0.17 * Math.cos(rad(hbp - 30))
+    + 0.24 * Math.cos(rad(2 * hbp))
+    + 0.32 * Math.cos(rad(3 * hbp + 6))
+    - 0.20 * Math.cos(rad(4 * hbp - 63));
+
+  const dTheta = 30 * Math.exp(-Math.pow((hbp - 275) / 25, 2));
+  const Rc = 2 * Math.sqrt(Math.pow(Cbp, 7) / (Math.pow(Cbp, 7) + Math.pow(25, 7)));
+  const Sl = 1 + (0.015 * Math.pow(Lbp - 50, 2)) / Math.sqrt(20 + Math.pow(Lbp - 50, 2));
+  const Sc = 1 + 0.045 * Cbp;
+  const Sh = 1 + 0.015 * Cbp * T;
+  const Rt = -Math.sin(rad(2 * dTheta)) * Rc;
+
+  return Math.sqrt(
+    Math.pow(dLp / Sl, 2) +
+    Math.pow(dCp / Sc, 2) +
+    Math.pow(dHp / Sh, 2) +
+    Rt * (dCp / Sc) * (dHp / Sh)
+  );
+}
+
+function level(de){
+  if(de < 1) return '几乎一致';
+  if(de < 2) return '极接近';
+  if(de < 3.5) return '很接近';
+  if(de < 6) return '较接近';
+  if(de < 10) return '有可见差异';
+  return '差异明显，需继续小试';
+}
+
+function makeAdvice(t, m){
+  const lt = rgbToLab(t);
+  const lm = rgbToLab(m);
+
+  const dL = lt[0] - lm[0];
+  const da = lt[1] - lm[1];
+  const db = lt[2] - lm[2];
+
+  const lines = [];
+
+  if(Math.abs(dL) > 1.2){
+    if(dL > 0){
+      lines.push({ name: '提亮 / 加白方向', value: Math.min(0.80, Math.abs(dL) * 0.035).toFixed(3) + '%' });
+    } else {
+      lines.push({ name: '压暗 / 加深方向', value: Math.min(0.80, Math.abs(dL) * 0.035).toFixed(3) + '%' });
+    }
+  }
+
+  if(Math.abs(da) > 1.2){
+    if(da > 0){
+      lines.push({ name: '偏绿，加红方向', value: Math.min(0.50, Math.abs(da) * 0.025).toFixed(3) + '%' });
+    } else {
+      lines.push({ name: '偏红，加绿方向', value: Math.min(0.50, Math.abs(da) * 0.025).toFixed(3) + '%' });
+    }
+  }
+
+  if(Math.abs(db) > 1.2){
+    if(db > 0){
+      lines.push({ name: '偏蓝，加黄方向', value: Math.min(0.50, Math.abs(db) * 0.025).toFixed(3) + '%' });
+    } else {
+      lines.push({ name: '偏黄，加蓝方向', value: Math.min(0.50, Math.abs(db) * 0.025).toFixed(3) + '%' });
+    }
+  }
+
+  if(lines.length === 0){
+    lines.push({ name: '方向接近', value: '建议小试复测' });
+  }
+
+  return lines;
+}
+
+function renderAdvice(lines){
+  const box = document.getElementById('tips');
+  box.innerHTML = lines.map(x => `
+    <div class="tipLine">
+      <span>${x.name}</span>
+      <span>${x.value}</span>
+    </div>
+  `).join('');
+}
+
+function update(){
+  if(!target || !mix){
+    document.getElementById('de').textContent = '--';
+    document.getElementById('deText').textContent = '请取样板色和调色区';
+    return;
+  }
+
+  setChip('chipT', target);
+  setChip('chipM', mix);
+  document.getElementById('hexT').textContent = hex(target);
+  document.getElementById('hexM').textContent = hex(mix);
+
+  const de = deltaE00(rgbToLab(target), rgbToLab(mix));
+  document.getElementById('de').textContent = de.toFixed(2);
+  document.getElementById('deText').textContent = level(de);
+  renderAdvice(makeAdvice(target, mix));
+}
+
+document.getElementById('btnStart').onclick = async () => {
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' }
+    });
+    video.srcObject = stream;
+    await video.play();
+    video.style.display = 'block';
+    canvas.style.display = 'none';
+    draw();
+  }catch(e){
+    alert('无法启动摄像头：' + e.message);
+  }
+};
+
+document.getElementById('btnStop').onclick = () => {
+  if(stream){
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+  video.style.display = 'none';
+  canvas.style.display = 'block';
+};
+
+document.getElementById('btnTarget').onclick = () => {
+  if(!stream) return alert('请先启动摄像头');
+  draw();
+  target = sample(0.25, 0.5);
+  update();
+};
+
+document.getElementById('btnMix').onclick = () => {
+  if(!stream) return alert('请先启动摄像头');
+  draw();
+  mix = sample(0.75, 0.5);
+  update();
+};
+
+document.getElementById('btnCheck').onclick = () => {
+  if(!stream) return alert('请先启动摄像头');
+  draw();
+  target = sample(0.25, 0.5);
+  mix = sample(0.75, 0.5);
+  update();
+};
+
+document.getElementById('btnClear').onclick = () => {
+  target = null;
+  mix = null;
+  document.getElementById('chipT').style.background = '#222';
+  document.getElementById('chipM').style.background = '#222';
+  document.getElementById('hexT').textContent = '#------';
+  document.getElementById('hexM').textContent = '#------';
+  document.getElementById('de').textContent = '--';
+  document.getElementById('deText').textContent = '未取样';
+  document.getElementById('tips').innerHTML = '<div class="muted">已清空，请重新取样。</div>';
+};
+</script>
+</body>
+</html>
