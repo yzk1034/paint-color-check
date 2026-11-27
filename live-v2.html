@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>漆色比对助手</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;font:14px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif;background:#111;color:#eee}
+  .wrap{max-width:540px;margin:0 auto;padding:12px}
+  .stage{position:relative;background:#000;border-radius:12px;overflow:hidden}
+  video{display:none;width:100%;aspect-ratio:4/3;object-fit:cover}
+  canvas{display:block;width:100%;aspect-ratio:4/3}
+  .split{position:absolute;left:50%;top:0;bottom:0;width:2px;background:#ff5252;pointer-events:none}
+  .tag{position:absolute;top:8px;font-size:12px;background:rgba(0,0,0,.55);padding:4px 8px;border-radius:8px;pointer-events:none}
+  .tag.l{left:8px}.tag.r{right:8px}
+  .dot{position:absolute;width:18px;height:18px;margin-left:-9px;margin-top:-9px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 2px rgba(0,0,0,.45);pointer-events:none}
+  .dotL{left:25%;top:50%;background:#ff5252}
+  .dotR{left:75%;top:50%;background:#42a5f5}
+  .hint{color:#ffb74d;font-size:12px;margin:6px 0 10px}
+  .row{display:flex;gap:8px;margin:10px 0}
+  button{flex:1;padding:10px;border:0;border-radius:10px;background:#2b3038;color:#ddd;font-size:14px}
+  button.on{background:#2b7038;color:#fff}
+  .sw{display:flex;gap:10px;margin:12px 0}
+  .cell{flex:1;background:#1a1e24;border-radius:10px;padding:10px}
+  .chip{height:52px;border-radius:8px;border:1px solid #333}
+  .card{background:#1a1e24;border-radius:10px;padding:12px;margin:12px 0}
+  .big{font-size:26px;font-weight:600}
+  .warn{color:#ffb74d}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+    <div class="split"></div>
+    <div class="tag l">目标色（左半）</div>
+    <div class="tag r">调色区（右半）</div>
+    <div class="dot dotL"></div>
+    <div class="dot dotR"></div>
+  </div>
+  <div class="hint">红点=目标色取色点，蓝点=调色区取色点；仅为方向参考，需小试验证</div>
+
+  <div class="row">
+    <button id="btnStart">启动摄像头</button>
+    <button id="btnStop">停止</button>
+  </div>
+  <div class="row">
+    <button id="btnLive">开始实时对比</button>
+  </div>
+  <div class="row">
+    <button id="btnTarget">取目标色（左红点）</button>
+    <button id="btnMix">取调色区（右蓝点）</button>
+  </div>
+  <div class="row">
+    <button id="btnWhite">取白参考</button>
+    <button id="btnClear">清空</button>
+  </div>
+
+  <div class="sw">
+    <div class="cell">
+      <div class="chip" id="chipT" style="background:#222"></div>
+      <div id="hexT">#------</div>
+      <div>目标色</div>
+    </div>
+    <div class="cell">
+      <div class="chip" id="chipM" style="background:#222"></div>
+      <div id="hexM">#------</div>
+      <div>调色区</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div>色差 ΔE00（越小越接近）</div>
+    <div class="big" id="de">--</div>
+    <div id="deText">未取样</div>
+    <div class="warn" id="dir"></div>
+    <div class="warn" id="trend"></div>
+  </div>
+
+  <div class="card">
+    <div>色浆相对着色力（自己填，1 = 你基准色浆）</div>
+    <div class="row"><button id="btnTint">按当前方向估算</button></div>
+    <div id="tintOut">仅方向估算，不代表精确克数</div>
+  </div>
+</div>
+
+<script>
+const video=document.getElementById('video');
+const canvas=document.getElementById('canvas');
+const ctx=canvas.getContext('2d',{willReadFrequently:true});
+let stream=null,liveTimer=null,lastDE=null,trendText='';
+
+function hex(rgb){return '#'+rgb.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join('').toUpperCase()}
+function sample(x,y){
+  const w=canvas.width,h=canvas.height;
+  const d=ctx.getImageData(Math.round(x*w),Math.round(y*h),1,1).data;
+  return [d[0],d[1],d[2]];
+}
+function draw(){
+  if(video.readyState>=2){ctx.drawImage(video,0,0,canvas.width,canvas.height)}
+}
+function centerLeft(){draw();return sample(0.25,0.5)}
+function centerRight(){draw();return sample(0.75,0.5)}
+function setChip(id,rgb){document.getElementById(id).style.background=hex(rgb)}
+
+function srgbToLinear(c){c/=255;return c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4)}
+function rgbToXyz(rgb){
+  const r=srgbToLinear(rgb[0]),g=srgbToLinear(rgb[1]),b=srgbToLinear(rgb[2]);
+  return [r*0.4124564+g*0.3575761+b*0.1804375,r*0.2126729+g*0.7151522+b*0.0721750,r*0.0193339+g*0.1191920+b*0.9503041];
+}
+function xyzToLab(xyz){
+  const wp=[0.95047,1,1.08883];
+  const f=t=>t>0.008856?Math.cbrt(t):(7.787*t+16/116);
+  const fx=f(xyz[0]/wp[0]),fy=f(xyz[1]/wp[1]),fz=f(xyz[2]/wp[2]);
+  return [116*fy-16,500*(fx-fy),200*(fy-fz)];
+}
+function rgbToLab(rgb){return xyzToLab(rgbToXyz(rgb))}
+
+function deltaE00(l1,l2){
+  const rad=d=>d*Math.PI/180,deg=r=>r*180/Math.PI;
+  const [L1,a1,b1]=l1,[L2,a2,b2]=l2;
+  const C1=Math.hypot(a1,b1),C2=Math.hypot(a2,b2),C=(C1+C2)/2;
+  const G=0.5*(1-Math.sqrt(Math.pow(C,7)/(Math.pow(C,7)+Math.pow(25,7))));
+  const a1p=(1+G)*a1,a2p=(1+G)*a2;
+  const C1p=Math.hypot(a1p,b1),C2p=Math.hypot(a2p,b2);
+  const h1p=(deg(Math.atan2(b1,a1p))+360)%360,h2p=(deg(Math.atan2(b2,a2p))+360)%360;
+  let dhp=0;
+  if(C1p*C2p!==0){
+    dhp=h2p-h1p;
+    if(dhp>180)dhp-=360;
+    if(dhp<-180)dhp+=360;
+  }
+  const dLp=L2-L1,dCp=C2p-C1p,dHp=2*Math.sqrt(C1p*C2p)*Math.sin(rad(dhp)/2);
+  const Lbp=(L1+L2)/2,Cbp=(C1p+C2p)/2;
+  let hbp=h1p+h2p;
+  if(C1p*C2p!==0){
+    if(Math.abs(h1p-h2p)>180)hbp+=360;
+    hbp/=2;
+    if(hbp<0)hbp+=360;
+  }else hbp=h1p+h2p;
+  const T=1-0.17*Math.cos(rad(hbp-30))+0.24*Math.cos(rad(2*hbp))+0.32*Math.cos(rad(3*hbp+6))-0.20*Math.cos(rad(4*hbp-63));
+  const dTheta=30*Math.exp(-Math.pow((hbp-275)/25,2));
+  const Rc=2*Math.sqrt(Math.pow(Cbp,7)/(Math.pow(Cbp,7)+Math.pow(25,7)));
+  const Sl=1+(0.015*Math.pow(Lbp-50,2))/Math.sqrt(20+Math.pow(Lbp-50,2));
+  const Sc=1+0.045*Cbp,Sh=1+0.015*Cbp*T;
+  const Rt=-Math.sin(rad(2*dTheta))*Rc;
+  return Math.sqrt(Math.pow(dLp/Sl,2)+Math.pow(dCp/Sc,2)+Math.pow(dHp/Sh,2)+Rt*(dCp/Sc)*(dHp/Sh));
+}
+
+function level(de){
+  if(de<1)return '几乎一致';
+  if(de<2)return '极接近';
+  if(de<3.5)return '很接近';
+  if(de<6)return '较接近';
+  if(de<10)return '有可见差异';
+  return '差异明显，需继续调';
+}
+function direction(t,m){
+  const lt=rgbToLab(t),lm=rgbToLab(m);
+  const dL=lt[0]-lm[0],da=lt[1]-lm[1],db=lt[2]-lm[2];
+  const arr=[];
+  if(dL>1.5)arr.push('偏暗，需提亮');
+  if(dL<-1.5)arr.push('偏亮，需压暗');
+  if(da<-1.5)arr.push('偏绿，需加红');
+  if(da>1.5)arr.push('偏红，需加绿');
+  if(db>1.5)arr.push('偏黄，需加蓝');
+  if(db<-1.5)arr.push('偏蓝，需加黄');
+  return arr.length?arr.join('；'):'方向接近，建议小试复测';
+}
+
+function update(t,m){
+  setChip('chipT',t);setChip('chipM',m);
+  document.getElementById('hexT').textContent=hex(t);
+  document.getElementById('hexM').textContent=hex(m);
+  const de=deltaE00(rgbToLab(t),rgbToLab(m));
+  document.getElementById('de').textContent=de.toFixed(2);
+  document.getElementById('deText').textContent=level(de);
+  document.getElementById('dir').textContent=direction(t,m);
+  if(lastDE!==null){
+    const diff=de-lastDE;
+    trendText=diff<-0.2?'趋势：接近中':diff>0.2?'趋势：偏离中':'趋势：稳定';
+    document.getElementById('trend').textContent=trendText;
+  }
+  lastDE=de;
+}
+
+function liveTick(){
+  if(!stream)return;
+  draw();
+  update(centerLeft(),centerRight());
+}
+
+document.getElementById('btnStart').onclick=async()=>{
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    video.srcObject=stream;
+    await video.play();
+    video.style.display='block';
+    canvas.style.display='none';
+    draw();
+  }catch(e){alert('无法启动摄像头：'+e.message)}
+};
+document.getElementById('btnStop').onclick=()=>{
+  stopLive();
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  video.style.display='none';
+  canvas.style.display='block';
+};
+document.getElementById('btnLive').onclick=e=>{
+  if(liveTimer){stopLive();e.target.textContent='开始实时对比';e.target.classList.remove('on');return}
+  if(!stream){alert('请先启动摄像头');return}
+  liveTimer=setInterval(liveTick,500);
+  liveTick();
+  e.target.textContent='停止实时对比';
+  e.target.classList.add('on');
+};
+function stopLive(){
+  if(liveTimer){clearInterval(liveTimer);liveTimer=null}
+  const b=document.getElementById('btnLive');
+  b.textContent='开始实时对比';b.classList.remove('on');
+}
+document.getElementById('btnTarget').onclick=()=>{
+  if(!stream)return alert('请先启动摄像头');
+  draw();
+  window._t=centerLeft();
+  if(window._m)update(window._t,window._m);
+  else setChip('chipT',window._t),document.getElementById('hexT').textContent=hex(window._t);
+};
+document.getElementById('btnMix').onclick=()=>{
+  if(!stream)return alert('请先启动摄像头');
+  draw();
+  window._m=centerRight();
+  if(window._t)update(window._t,window._m);
+  else setChip('chipM',window._m),document.getElementById('hexM').textContent=hex(window._m);
+};
+document.getElementById('btnWhite').onclick=()=>{
+  if(!stream)return alert('请先启动摄像头');
+  draw();
+  window._w=centerRight();
+};
+document.getElementById('btnClear').onclick=()=>{
+  stopLive();
+  window._t=null;window._m=null;window._w=null;lastDE=null;
+  ['chipT','chipM'].forEach(id=>document.getElementById(id).style.background='#222');
+  document.getElementById('hexT').textContent='#------';
+  document.getElementById('hexM').textContent='#------';
+  document.getElementById('de').textContent='--';
+  document.getElementById('deText').textContent='未取样';
+  document.getElementById('dir').textContent='';
+  document.getElementById('trend').textContent='';
+};
+document.getElementById('btnTint').onclick=()=>{
+  if(!window._t||!window._m)return alert('请先取目标色和调色区');
+  document.getElementById('tintOut').textContent='只能给方向：'+direction(window._t,window._m)+'。精确克数需色母品牌、浓度、调漆总量和试板复测。';
+};
+</script>
+</body>
+</html>
