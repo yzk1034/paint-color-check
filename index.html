@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>漆色比对助手</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;font:14px/1.6 system-ui,"PingFang SC",sans-serif;background:#0f1115;color:#eee}
+  .wrap{max-width:540px;margin:0 auto;padding:12px 14px 40px}
+  .stage{position:relative;background:#000;border-radius:10px;overflow:hidden}
+  video{display:none}
+  canvas#out{display:block;width:100%;aspect-ratio:4/3}
+  .split{position:absolute;left:50%;top:0;bottom:0;width:2px;background:#e53935}
+  .tag{position:absolute;top:8px;font-size:12px;background:rgba(0,0,0,.6);padding:3px 8px;border-radius:6px}
+  .tag.l{left:8px}.tag.r{right:8px}
+  .dot{position:absolute;width:20px;height:20px;border-radius:50%;border:2px solid #fff;
+       transform:translate(-50%,-50%);display:none;pointer-events:none}
+  .dot.t{border-color:#ff5252}.dot.m{border-color:#69f0ae}
+  .row{display:flex;gap:8px;margin:10px 0}
+  button{flex:1;padding:10px;border:0;border-radius:8px;background:#2f6fed;color:#fff;font-size:14px}
+  button.g{background:#2b3038;color:#ddd}
+  .sw{display:flex;gap:10px;margin:12px 0}
+  .cell{flex:1;background:#1a1e24;border-radius:8px;padding:8px}
+  .chip{height:52px;border-radius:6px;border:1px solid #333}
+  .hex{font-size:12px;color:#bbb;margin-top:4px;font-variant-numeric:tabular-nums}
+  .name{font-size:12px;color:#888}
+  .box{background:#1a1e24;border-radius:8px;padding:12px;margin:12px 0}
+  .big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+  .sub{color:#9aa0a6;font-size:12px}
+  .dir{margin-top:6px;color:#ffd54f;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td{padding:5px 4px;border-bottom:1px solid #262b33}
+  input[type=number]{width:74px;background:#0f1319;border:1px solid #333;color:#eee;
+       border-radius:6px;padding:5px 6px;font-size:13px}
+  .warn{color:#ff8a65;font-size:12px;line-height:1.8;margin-top:8px}
+  #msg{color:#ffb74d;font-size:13px;min-height:20px}
+  .tip{color:#7d8590;font-size:12px;line-height:1.9;margin-top:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="stage">
+    <video id="v" playsinline muted></video>
+    <canvas id="out"></canvas>
+    <div class="split"></div>
+    <div class="tag l">目标色（左半）</div>
+    <div class="tag r">调色区（右半）</div>
+    <div class="dot t" id="dotT"></div>
+    <div class="dot m" id="dotM"></div>
+  </div>
+
+  <div id="msg"></div>
+
+  <div class="row">
+    <button id="start">启动摄像头</button>
+    <button class="g" id="stop">停止</button>
+  </div>
+  <div class="row">
+    <button class="g" id="pickT">取目标色（点左半）</button>
+    <button class="g" id="pickM">取调色区（点右半）</button>
+  </div>
+  <div class="row">
+    <button class="g" id="white">取白参考</button>
+    <button class="g" id="clr">清空</button>
+  </div>
+
+  <div class="sw">
+    <div class="cell">
+      <div class="chip" id="chipT"></div>
+      <div class="hex" id="hexT">未取色</div>
+      <div class="name">目标色</div>
+    </div>
+    <div class="cell">
+      <div class="chip" id="chipM"></div>
+      <div class="hex" id="hexM">未取色</div>
+      <div class="name">调色区</div>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="sub">色差 ΔE00（越小越接近）</div>
+    <div class="big" id="de">—</div>
+    <div class="sub" id="deNote">需先取两个色</div>
+    <div class="dir" id="dir"></div>
+  </div>
+
+  <div class="box">
+    <div class="sub" style="margin-bottom:6px">
+      色浆相对着色力（自己填，1 = 你基准色浆）
+    </div>
+    <table id="ptab"></table>
+    <div class="row">
+      <button id="calc">按色差推算方向比例</button>
+    </div>
+    <div class="sub" id="ratio">未计算</div>
+    <div class="warn">
+      这里给的是「该往哪个方向加、相对加多少」的参考，不是可直接称量的配方。 
+      真实添加量还取决于色浆颜料浓度、基漆遮盖力、漆膜厚度和干燥后色差，必须小试验证。
+    </div>
+  </div>
+
+  <div class="tip">
+    取色前建议先在画面里放一张白纸或中性灰卡，点「取白参考」，用于做简单的白平衡补偿； 
+    没有白参考也能用，但环境光偏色会直接带进结果。 
+    取色点避开高光、阴影和反光边缘，同一处多点几次取平均更稳。
+  </div>
+</div>
+
+<script>
+const v=document.getElementById('v');
+const out=document.getElementById('out');
+const octx=out.getContext('2d',{willReadFrequently:true});
+
+let stream=null,raf=0,running=false;
+let mode=null;                 // 'T' | 'M' | 'W'
+let refWhite=null;             // 白参考 RGB
+let cT=null,cM=null;           // 校正后 RGB
+let rawT=null,rawM=null;
+
+const msg=document.getElementById('msg');
+const dotT=document.getElementById('dotT'),dotM=document.getElementById('dotM');
+
+// ---------- 色浆表 ----------
+const pigments=[
+  {k:'白',lab:[100,0,0]},
+  {k:'黑',lab:[0,0,0]},
+  {k:'红',lab:[53,80,67]},
+  {k:'黄',lab:[87,-9,87]},
+  {k:'蓝',lab:[32,79,-108]},
+  {k:'绿',lab:[51,-88,68]}
+];
+const power={};
+const ptab=document.getElementById('ptab');
+pigments.forEach(p=>{
+  power[p.k]=1;
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td>${p.k}</td><td class="sub">基准=1</td>
+    <td><input type="number" step="0.1" min="0.1" value="1" data-k="${p.k}"></td>`;
+  ptab.appendChild(tr);
+});
+ptab.addEventListener('input',e=>{
+  const k=e.target.dataset.k;
+  if(k) power[k]=Math.max(0.1,parseFloat(e.target.value)||1);
+});
+
+// ---------- 颜色计算 ----------
+function srgb2lin(c){c/=255;return c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4);}
+function rgb2lab(rgb){
+  const r=srgb2lin(rgb[0]),g=srgb2lin(rgb[1]),b=srgb2lin(rgb[2]);
+  let x=(r*0.4124+g*0.3576+b*0.1805)/0.95047;
+  let y=(r*0.2126+g*0.7152+b*0.0722);
+  let z=(r*0.0193+g*0.1192+b*0.9505)/1.08883;
+  const f=t=>t>0.008856?Math.cbrt(t):(7.787*t+16/116);
+  x=f(x);y=f(y);z=f(z);
+  return [116*y-16,500*(x-y),200*(y-z)];
+}
+function deltaE00(l1,l2){
+  const [L1,a1,b1]=l1,[L2,a2,b2]=l2;
+  const C1=Math.hypot(a1,b1),C2=Math.hypot(a2,b2),Cb=(C1+C2)/2;
+  const G=0.5*(1-Math.sqrt(Math.pow(Cb,7)/(Math.pow(Cb,7)+Math.pow(25,7))));
+  const a1p=a1*(1+G),a2p=a2*(1+G);
+  const C1p=Math.hypot(a1p,b1),C2p=Math.hypot(a2p,b2);
+  const h=p=>{let x=Math.atan2(p[1],p[0])*180/Math.PI;return x<0?x+360:x;};
+  const h1p=h([a1p,b1]),h2p=h([a2p,b2]);
+  let dhp=h2p-h1p;
+  if(Math.abs(dhp)>180) dhp+= dhp>0?-360:360;
+  const dH=2*Math.sqrt(C1p*C2p)*Math.sin(dhp*Math.PI/360);
+  const dL=L2-L1,dC=C2p-C1p;
+  const Lbp=(L1+L2)/2,Cbp=(C1p+C2p)/2;
+  let hbp=h1p+h2p;
+  if(Math.abs(h1p-h2p)>180) hbp+= hbp<360?360:-360;
+  hbp/=2;
+  const T=1-0.17*Math.cos((hbp-30)*Math.PI/180)
+           +0.24*Math.cos(2*hbp*Math.PI/180)
+           +0.32*Math.cos((3*hbp+6)*Math.PI/180)
+           -0.20*Math.cos((4*hbp-63)*Math.PI/180);
+  const SL=1+0.015*Math.pow(Lbp-50,2)/Math.sqrt(20+Math.pow(Lbp-50,2));
+  const SC=1+0.045*Cbp, SH=1+0.015*Cbp*T;
+  const dTh=30*Math.exp(-Math.pow((hbp-275)/25,2));
+  const RC=2*Math.sqrt(Math.pow(Cbp,7)/(Math.pow(Cbp,7)+Math.pow(25,7)));
+  const RT=-Math.sin(2*dTh*Math.PI/180)*RC;
+  return Math.sqrt(Math.pow(dL/SL,2)+Math.pow(dC/SC,2)+Math.pow(dH/SH,2)
+                   +RT*(dC/SC)*(dH/SH));
+}
+// 白平衡：按白参考把三通道拉回等值
+function wb(rgb){
+  if(!refWhite||refWhite.some(c=>c<16)) return rgb.slice();
+  const avg=(refWhite[0]+refWhite[1]+refWhite[2])/3;
+  return rgb.map((c,i)=>Math.min(255,Math.max(0,c*avg/refWhite[i])));
+}
+const hex=c=>'#'+c.map(x=>Math.round(x).toString(16).padStart(2,'0')).join('').toUpperCase();
+
+// ---------- 取色 ----------
+function sample(cx,cy){
+  const d=octx.getImageData(cx,cy,1,1).data;
+  return [d[0],d[1],d[2]];
+}
+out.addEventListener('pointerdown',ev=>{
+  if(!running){msg.textContent='先启动摄像头';return;}
+  if(!mode){msg.textContent='先点「取目标色」或「取调色区」';return;}
+  const r=out.getBoundingClientRect();
+  const x=Math.floor((ev.clientX-r.left)/r.width*out.width);
+  const y=Math.floor((ev.clientY-r.top)/r.height*out.height);
+  if(x<0||y<0||x>=out.width||y>=out.height) return;
+  if(mode!=='W'){
+    const half=out.width/2;
+    if(mode==='T'&&x>half){msg.textContent='目标色要点左半';return;}
+    if(mode==='M'&&x<half){msg.textContent='调色区要点右半';return;}
+  }
+  const raw=sample(x,y);
+  const pos=((x+0.5)/out.width*r.width)+'px';
+  const top=((y+0.5)/out.height*r.height)+'px';
+  if(mode==='W'){
+    refWhite=raw; msg.textContent='白参考已取：'+hex(raw)+'（后续取色会做补偿）';
+  }else if(mode==='T'){
+    rawT=raw;cT=wb(raw);
+    dotT.style.display='block';dotT.style.left=pos;dotT.style.top=top;
+    msg.textContent='目标色已取';
+  }else{
+    rawM=raw;cM=wb(raw);
+    dotM.style.display='block';dotM.style.left=pos;dotM.style.top=top;
+    msg.textContent='调色区已取';
+  }
+  mode=null; render();
+});
+
+document.getElementById('pickT').onclick=()=>{mode='T';msg.textContent='现在点画面左半';};
+document.getElementById('pickM').onclick=()=>{mode='M';msg.textContent='现在点画面右半';};
+document.getElementById('white').onclick=()=>{mode='W';msg.textContent='现在点画面里的白纸/灰卡';};
+document.getElementById('clr').onclick=()=>{
+  cT=cM=rawT=rawM=refWhite=null;
+  dotT.style.display=dotM.style.display='none';
+  document.getElementById('ratio').textContent='未计算';
+  msg.textContent='已清空';render();
+};
+
+// ---------- 渲染 ----------
+function render(){
+  const set=(chip,hexEl,c,label)=>{
+    if(c){chip.style.background=hex(c);hexEl.textContent=hex(c);}
+    else{chip.style.background='#111';hexEl.textContent='未取色';}
+  };
+  set(document.getElementById('chipT'),document.getElementById('hexT'),cT);
+  set(document.getElementById('chipM'),document.getElementById('hexM'),cM);
+
+  const deEl=document.getElementById('de'),
+        note=document.getElementById('deNote'),
+        dirEl=document.getElementById('dir');
+  if(!cT||!cM){deEl.textContent='—';note.textContent='需先取两个色';dirEl.textContent='';return;}
+  const d=deltaE00(rgb2lab(cM),rgb2lab(cT));
+  deEl.textContent=d.toFixed(2);
+  note.textContent = d<1 ? '人眼很难分辨'
+                   : d<2 ? '极接近，仔细对比可察觉'
+                   : d<3.5 ? '接近，同环境下可接受'
+                   : d<6 ? '有可见差异'
+                   : '差异明显，需继续调';
+  const lM=rgb2lab(cM),lT=rgb2lab(cT);
+  const parts=[];
+  if(Math.abs(lT[0]-lM[0])>0.8) parts.push(lT[0]>lM[0]?'偏暗，需提亮':'偏亮，需压暗');
+  if(Math.abs(lT[1]-lM[1])>0.8) parts.push(lT[1]>lM[1]?'偏绿，需加红':'偏红，需加绿');
+  if(Math.abs(lT[2]-lM[2])>0.8) parts.push(lT[2]>lM[2]?'偏蓝，需加黄':'偏黄，需加蓝');
+  dirEl.textContent=parts.length?('当前调色区相对目标：'+parts.join('；')):'三轴差异都在 0.8 以内';
+}
+
+document.getElementById('calc').onclick=()=>{
+  if(!cT||!cM){msg.textContent='先取两个色';return;}
+  const lM=rgb2lab(cM),lT=rgb2lab(cT);
+  const dL=lT[0]-lM[0],da=lT[1]-lM[1],db=lT[2]-lM[2];
+  // 用各色素在 a/b 轴上的投影做方向权重，再按着色力归一
+  const w={};
+  let sum=0;
+  pigments.forEach(p=>{
+    const proj=Math.max(0,da*p.lab[1]+db*p.lab[2]);
+    const lum=Math.abs(dL)*Math.abs(p.lab[0]-50)/50;
+    const raw=(proj/100)+(p.k==='白'&&dL>0?Math.abs(dL)/50:0)
+             +(p.k==='黑'&&dL<0?Math.abs(dL)/50:0);
+    const val=raw/power[p.k];
+    w[p.k]=val; sum+=val;
+  });
+  const lines=pigments
+    .map(p=>[p.k,(w[p.k]/(sum||1)*100)])
+    .filter(x=>x[1]>0.5)
+    .sort((a,b)=>b[1]-a[1]);
+  document.getElementById('ratio').textContent =
+    lines.length? lines.map(x=>`${x[0]} ${x[1].toFixed(1)}%`).join(' · ')
+                : '色差主要不在色相轴上，先调明度';
+  msg.textContent='仅为方向参考，需小试验证';
+};
+
+// ---------- 摄像头 ----------
+document.getElementById('start').onclick=async()=>{
+  msg.textContent='';
+  if(!navigator.mediaDevices?.getUserMedia){
+    msg.textContent='不支持摄像头：请用 HTTPS 或 localhost 打开';return;
+  }
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment',width:{ideal:1280}},audio:false});
+    v.srcObject=stream;await v.play();
+    const ratio=(v.videoWidth||4)/(v.videoHeight||3);
+    out.width=480;out.height=Math.round(480/ratio);
+    running=true;loop();
+  }catch(e){
+    msg.textContent='启动失败：'+(e.name==='NotAllowedError'?'权限被拒绝':e.message);
+  }
+};
+document.getElementById('stop').onclick=()=>{
+  running=false;cancelAnimationFrame(raf);
+  if(stream){stream.getTracks().forEach(k=>k.stop());stream=null;}
+};
+function loop(){
+  if(!running)return;
+  raf=requestAnimationFrame(loop);
+  if(v.readyState<2)return;
+  octx.drawImage(v,0,0,out.width,out.height);
+}
+render();
+</script>
+</body>
+</html>
